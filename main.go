@@ -3,18 +3,23 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"gopkg.in/yaml.v2"
+	"io"
+	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
-
-const version = "0.0.1"
 
 const relayHost = "delthas.fr:14761"
 
@@ -228,22 +233,173 @@ func server(port int) {
 	}
 }
 
+func update(scanner *bufio.Scanner) bool {
+	httpClient := http.Client{Timeout: 2 * time.Second}
+	r, err := httpClient.Get("https://api.github.com/repos/delthas/proxypunch/releases")
+	if err != nil {
+		// throw error even if the user is just disconnected from the internet
+		fmt.Fprintln(os.Stderr, "Error while looking for updates: "+err.Error())
+		return false
+	}
+	var releases []struct {
+		TagName string `json:"tag_name"`
+		Name    string `json:"name"`
+		Assets  []struct {
+			Name        string `json:"name"`
+			DownloadUrl string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&releases)
+	r.Body.Close()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error while processing updates list: "+err.Error())
+		return false
+	}
+	for _, v := range releases {
+		if v.TagName == ProgramVersion {
+			return false
+		}
+		for _, asset := range v.Assets {
+			if strings.Contains(asset.Name, ProgramArch) {
+				update := ""
+				for update != "y" && update != "yes" && update != "n" && update != "no" {
+					fmt.Println("proxypunch update " + v.Name + " is available! Download and update now? y(es) / n(o) [yes]")
+					if !scanner.Scan() {
+						return false
+					}
+					update = strings.ToLower(scanner.Text())
+					if update == "" {
+						update = "y"
+					}
+				}
+				if update != "y" && update != "yes" {
+					return false
+				}
+				r, err = httpClient.Get(asset.DownloadUrl)
+				if err != nil {
+					// throw error even if the user is just disconnected from the internet
+					fmt.Fprintln(os.Stderr, "Error while downloading update (http get): "+err.Error())
+					return false
+				}
+				f, err := ioutil.TempFile("", "")
+				if err != nil {
+					r.Body.Close()
+					// throw error even if the user is just disconnected from the internet
+					fmt.Fprintln(os.Stderr, "Error while downloading update (file open): "+err.Error())
+					return false
+				}
+				_, err = io.Copy(f, r.Body)
+				r.Body.Close()
+				f.Close()
+				if err != nil {
+					// throw error even if the user is just disconnected from the internet
+					fmt.Fprintln(os.Stderr, "Error while downloading update (io copy): "+err.Error())
+					return false
+				}
+
+				exe, err := os.Executable()
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "Error while downloading update (exe path get): "+err.Error())
+					return false
+				}
+				exe, err = filepath.EvalSymlinks(exe)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "Error while downloading update (exe path eval): "+err.Error())
+					return false
+				}
+
+				var perm os.FileMode
+				if info, err := os.Stat(exe); err != nil {
+					perm = info.Mode()
+				} else {
+					perm = 0777
+				}
+
+				if runtime.GOOS == "windows" {
+					err = os.Rename(exe, "proxypunch_old.exe")
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "Error while downloading update (move current file): "+err.Error())
+						return false
+					}
+				} else {
+					err = os.Remove(exe)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "Error while downloading update (unlink current file): "+err.Error())
+						return false
+					}
+				}
+
+				w, err := os.OpenFile(exe, os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "Error while downloading update (create new file): "+err.Error())
+					return false
+				}
+
+				r, err := os.Open(f.Name())
+				if err != nil {
+					w.Close()
+					fmt.Fprintln(os.Stderr, "Error while downloading update (open update file): "+err.Error())
+					return false
+				}
+
+				_, err = io.Copy(w, r)
+				r.Close()
+				w.Close()
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "Error while downloading update (copy update file): "+err.Error())
+					return false
+				}
+
+				cmd := exec.Command(exe, os.Args[1:]...)
+				cmd.Stdin = os.Stdin
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				cmd.Run()
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var ProgramVersion string
+var ProgramArch string
+
 func main() {
-	fmt.Println("ProxyPunch v" + version)
+	if ProgramVersion == "" {
+		ProgramVersion = "[Custom Build]"
+	}
+	fmt.Println("ProxyPunch " + ProgramVersion + " by delthas")
 	fmt.Println()
+
+	if runtime.GOOS == "windows" {
+		// cleanup old update file, ignore error
+		os.Remove("proxypunch_old.exe")
+	}
 
 	var mode string
 	var host string
 	var port int
 	var noSave bool
+	var noUpdate bool
 	var configFile string
 
 	flag.StringVar(&mode, "mode", "", "connect mode: server, client")
 	flag.StringVar(&host, "host", "", "remote host for client mode: ipv4 or ipv6 or hostname")
 	flag.IntVar(&port, "port", 0, "port for client or server mode")
 	flag.BoolVar(&noSave, "nosave", false, "disable saving configuration to file")
+	flag.BoolVar(&noUpdate, "noupdate", false, "disable automatic update")
 	flag.StringVar(&configFile, "config", "proxypunch.yml", "load configuration from file")
 	flag.Parse()
+
+	scanner := bufio.NewScanner(os.Stdin)
+
+	if !noUpdate && ProgramArch != "" && ProgramVersion != "[Custom Build]" {
+		if update(scanner) {
+			return
+		}
+	}
 
 	var config Config
 
@@ -276,8 +432,6 @@ func main() {
 	saveMode := mode == ""
 	saveHost := host == ""
 	savePort := port == 0
-
-	scanner := bufio.NewScanner(os.Stdin)
 
 	for mode != "s" && mode != "server" && mode != "c" && mode != "client" {
 		if config.Mode != "" {

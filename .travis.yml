@@ -1,0 +1,18 @@
+language: go
+go:
+- '1.10'
+env:
+- GOOS=windows GOARCH=amd64 ARCH=win64 EXT=.exe
+- GOOS=windows GOARCH=386 ARCH=win32 EXT=.exe
+- GOOS=linux GOARCH=amd64 ARCH=linux64 EXT=.run
+- GOOS=linux GOARCH=386 ARCH=linux32 EXT=.run
+script:
+- go build -ldflags "-X main.ProgramVersion=$TRAVIS_TAG -X main.ProgramArch=$ARCH" -o "proxypunch.${ARCH}${EXT}" main.go
+deploy:
+  provider: releases
+  api_key:
+    secure: Y2CmvDkJDq1TI/il+JvheT9L6Voks72lkSCtUIoxTW3XIy4jbMCFJpkvyEy4xPWlScu0YDZXxLRwL3m7WQw9u97e+smKSp/gzVvfQQbbkd4/NMrjgpVXGVIcHUgohvM7vTEjT/SKUw6vjG83UGV77l8wQMBpvDtCM6xET/d3civ5RcoArLK1ZPEOiesoKngmu8O3ecTtn33UpD0b0aPgf59zvXUfBjvpPqoVzX2daqIOzyGw+S9nFTV2R95vP239KK9oc4hzijSAnXu3/ccJlCrlZ970WOjt58si+ptDd3oDLXfqI/Huh54hYOau8/2GFhkozq0V/FQoU2UJU5vwMCZVa4QYV1HnNUdjDfAFVdMiyStaZ18uyiOX1NdBwL1wPaV8EFH3EnewZG6KcglzWhz8bovdPOh65SnuCfWMk7Uw6q2NdXAGQYsPW/7MCP1o51x0lldn9NS3eUMZanPlMb6t1qVfz/VhCkpGzaGmX3OnrSMRr2vB+qMU9x/gsr1lN5EwFLDsmA2BX4HHBW4mXv/gxHSIZoV5p6pprFx3MJ7CZjFuF5xB9ulnO0Vh0+O4iEAUBhyH3XIqffUJRjhC0kE3DuXn+FEVXmG0/b4x0eCQclZ1kBDFL8Jpux5ykzgeHFJFItXa+f9f0jDrCX4qXDRLFG7kEU62e2YRsoc8ywM=
+  file: "proxypunch.${ARCH}${EXT}"
+  skip_cleanup: true
+  on:
+    tags: true
