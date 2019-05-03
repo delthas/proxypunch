@@ -32,11 +32,11 @@ type serverValue struct {
 }
 
 func main() {
-	fmt.Println("ProxyPunch Server v" + version)
+	fmt.Println("proxypunch relay v" + version)
 	fmt.Println()
 
 	var port int
-	flag.IntVar(&port, "port", defaultPort, "server listen port")
+	flag.IntVar(&port, "port", defaultPort, "relay listen port")
 	flag.Parse()
 
 	c, err := net.ListenUDP("udp4", &net.UDPAddr{
@@ -94,6 +94,8 @@ func main() {
 			if val, ok := clients[key]; ok {
 				serverPayload := append([]byte{byte(val.natPort >> 8), byte(val.natPort)}, val.localIp[:]...)
 				c.WriteToUDP(serverPayload, addr)
+			} else {
+				c.WriteToUDP(senderIp[:], addr)
 			}
 		} else if n == 6 {
 			var ip [4]byte

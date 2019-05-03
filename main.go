@@ -48,7 +48,7 @@ func client(host string, port int) {
 	defer c.Close()
 
 	localPort := c.LocalAddr().(*net.UDPAddr).Port
-	fmt.Println("Listening, connect to 127.0.0.1:" + strconv.Itoa(localPort))
+	fmt.Println("Listening, connect to 127.0.0.1 on port " + strconv.Itoa(localPort))
 
 	relayAddr, err := net.ResolveUDPAddr("udp4", relayHost)
 	if err != nil {
@@ -109,6 +109,7 @@ func client(host string, port int) {
 	}()
 	defer close(chPunch)
 
+	foundPeer := false
 	var localAddr net.UDPAddr
 	for {
 		n, addr, err := c.ReadFromUDP(buffer[1:])
@@ -124,6 +125,10 @@ func client(host string, port int) {
 			continue
 		}
 		if addr.IP.Equal(remoteAddr.IP) && addr.Port == remoteAddr.Port {
+			if !foundPeer {
+				foundPeer = true
+				fmt.Println("Connected to peer")
+			}
 			if n != 0 && localAddr.Port != 0 && buffer[1] == 0xCC {
 				c.WriteToUDP(buffer[2:n+1], &localAddr)
 			}
@@ -142,7 +147,8 @@ func server(port int) {
 	}
 	defer c.Close()
 
-	fmt.Println("Listening, host at " + strconv.Itoa(port))
+	fmt.Println("Listening, start hosting on port " + strconv.Itoa(port))
+	fmt.Println("Connecting...")
 
 	localAddr := &net.UDPAddr{
 		IP:   net.IPv4(127, 0, 0, 1),
@@ -172,6 +178,7 @@ func server(port int) {
 	var remoteAddr net.UDPAddr
 	buffer := make([]byte, 4096)
 
+	receivedIp := false
 	for {
 		n, addr, err := c.ReadFromUDP(buffer)
 		if err != nil {
@@ -179,6 +186,14 @@ func server(port int) {
 			continue
 		}
 		if !addr.IP.Equal(relayAddr.IP) || addr.Port != relayAddr.Port {
+			continue
+		}
+		if n == 4 {
+			if !receivedIp {
+				receivedIp = true
+				ip := net.IP(buffer[:4])
+				fmt.Println("Connected. Ask your peer to connect to " + ip.String() + " on port " + strconv.Itoa(port) + " with proxypunch")
+			}
 			continue
 		}
 		if n != 6 {
@@ -209,6 +224,7 @@ func server(port int) {
 	}()
 	defer close(chPunch)
 
+	foundPeer := false
 	for {
 		n, addr, err := c.ReadFromUDP(buffer[1:])
 		if err != nil {
@@ -223,6 +239,10 @@ func server(port int) {
 			continue
 		}
 		if addr.IP.Equal(remoteAddr.IP) && addr.Port == remoteAddr.Port {
+			if !foundPeer {
+				foundPeer = true
+				fmt.Println("Connected to peer")
+			}
 			if n != 0 && buffer[1] == 0xCC {
 				c.WriteToUDP(buffer[2:n+1], localAddr)
 			}
@@ -370,7 +390,7 @@ func main() {
 	if ProgramVersion == "" {
 		ProgramVersion = "[Custom Build]"
 	}
-	fmt.Println("ProxyPunch " + ProgramVersion + " by delthas")
+	fmt.Println("proxypunch " + ProgramVersion + " by delthas")
 	fmt.Println()
 
 	if runtime.GOOS == "windows" {
