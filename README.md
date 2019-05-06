@@ -1,4 +1,4 @@
-# proxypunch
+# proxypunch ![Github All Releases](https://img.shields.io/github/downloads/delthas/proxypunch/total.svg?style=flat-square)
 
 **This program lets you host & connect to friends to play peer-to-peer games without having to open or redirect any port.**
 
