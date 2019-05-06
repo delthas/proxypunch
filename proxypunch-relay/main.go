@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-const version = "0.0.1"
+const version = "0.1.1"
 
-const defaultPort = 14761
+const defaultPort = 14762
 
 const flushInterval = 15 * time.Second
 
@@ -20,13 +20,13 @@ type key struct {
 	port int
 }
 
-type clientValue struct {
-	localIp [4]byte
+type serverValue struct {
 	natPort int
 	time    time.Time
 }
 
-type serverValue struct {
+type clientValue struct {
+	localIp [4]byte
 	natPort int
 	time    time.Time
 }
@@ -47,24 +47,29 @@ func main() {
 	}
 	defer c.Close()
 
-	clients := make(map[key]clientValue)
 	servers := make(map[key]serverValue)
+	clients := make(map[key]map[clientValue]struct{})
 
 	flushTime := time.Now()
 
-	buffer := make([]byte, 6)
+	buffer := make([]byte, 4096)
 	for {
 		now := time.Now()
 		if now.Sub(flushTime) > flushInterval {
 			flushTime = now
-			for k, v := range clients {
-				if now.Sub(v.time) > flushInterval {
-					delete(clients, k)
-				}
-			}
 			for k, v := range servers {
 				if now.Sub(v.time) > flushInterval {
 					delete(servers, k)
+				}
+			}
+			for k, v := range clients {
+				for k_ := range v {
+					if now.Sub(k_.time) > flushInterval {
+						delete(v, k_)
+					}
+				}
+				if len(v) == 0 {
+					delete(clients, k)
 				}
 			}
 		}
@@ -91,12 +96,22 @@ func main() {
 				natPort: addr.Port,
 				time:    time.Now(),
 			}
-			if val, ok := clients[key]; ok {
-				serverPayload := append([]byte{byte(val.natPort >> 8), byte(val.natPort)}, val.localIp[:]...)
-				c.WriteToUDP(serverPayload, addr)
-			} else {
-				c.WriteToUDP(senderIp[:], addr)
+			for i, v := range senderIp {
+				buffer[i] = v ^ 0xCC // xor ip to avoid nat rewriting it
 			}
+			n := 4
+			if v, ok := clients[key]; ok {
+				for k := range v {
+					if n+6 > 4096 {
+						break
+					}
+					buffer[n] = byte(k.natPort >> 8)
+					buffer[n+1] = byte(k.natPort)
+					copy(buffer[n+2:], k.localIp[:])
+					n += 6
+				}
+			}
+			c.WriteToUDP(buffer[:n], addr)
 		} else if n == 6 {
 			var ip [4]byte
 			copy(ip[:], buffer[2:])
@@ -104,13 +119,19 @@ func main() {
 				ip:   ip,
 				port: int(binary.BigEndian.Uint16(buffer[:2])),
 			}
-			clients[key] = clientValue{
+			v := clientValue{
 				localIp: senderIp,
 				natPort: addr.Port,
 				time:    time.Now(),
 			}
+			if c, ok := clients[key]; !ok {
+				clients[key] = make(map[clientValue]struct{}, 4)
+				clients[key][v] = struct{}{}
+			} else {
+				c[v] = struct{}{}
+			}
 			if val, ok := servers[key]; ok {
-				serverPayload := append([]byte{byte(val.natPort >> 8), byte(val.natPort)})
+				serverPayload := []byte{byte(val.natPort >> 8), byte(val.natPort)}
 				c.WriteToUDP(serverPayload, addr)
 			}
 		}

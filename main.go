@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"gopkg.in/yaml.v2"
 	"io"
 	"io/ioutil"
 	"log"
@@ -18,15 +17,46 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"gopkg.in/yaml.v2"
 )
 
-const relayHost = "delthas.fr:14761"
+const relayHost = "delthas.fr:14762"
 
 const defaultPort = 41254
 
+const flushInterval = 10 * time.Second
+
 var _, localIpv4, _ = net.ParseCIDR("127.0.0.0/8")
 var _, localIpv6, _ = net.ParseCIDR("fc00::/7")
+
+type addrKey struct {
+	ip   [4]byte
+	port int
+}
+
+func (s addrKey) toUDP() *net.UDPAddr {
+	return &net.UDPAddr{
+		IP:   s.ip[:],
+		Port: s.port,
+	}
+}
+
+func newAddrKey(udp *net.UDPAddr) addrKey {
+	var ip [4]byte
+	copy(ip[:], udp.IP.To4())
+	return addrKey{
+		ip:   ip,
+		port: udp.Port,
+	}
+}
+
+type addrValue struct {
+	c    *net.UDPConn
+	last time.Time
+}
 
 type Config struct {
 	Mode       string `yaml:"mode"`
@@ -48,7 +78,7 @@ func client(host string, port int) {
 	defer c.Close()
 
 	localPort := c.LocalAddr().(*net.UDPAddr).Port
-	fmt.Println("Listening, connect to 127.0.0.1 on port " + strconv.Itoa(localPort))
+	fmt.Println("Listening, connect to 127.0.0.1:" + strconv.Itoa(localPort))
 
 	relayAddr, err := net.ResolveUDPAddr("udp4", relayHost)
 	if err != nil {
@@ -160,72 +190,122 @@ func server(port int) {
 		log.Fatal(err)
 	}
 
+	mappings := make(map[addrKey]time.Time)
+	mappingsMutex := sync.Mutex{}
+
+	// relay & mappings keepalive
 	chRelay := make(chan struct{})
 	go func() {
 		relayPayload := []byte{byte(port >> 8), byte(port)}
+		punchPayload := []byte{0xCD}
+		flushTime := time.Now()
 		for {
 			select {
 			case <-chRelay:
 				return
 			default:
 			}
+
+			// timeout old mappings
+			now := time.Now()
+			if now.Sub(flushTime) > flushInterval {
+				flushTime = now
+				mappingsMutex.Lock()
+				for k, v := range mappings {
+					if now.Sub(v) > flushInterval {
+						delete(mappings, k)
+					}
+				}
+				mappingsMutex.Unlock()
+			}
+
 			c.WriteToUDP(relayPayload, relayAddr)
-			time.Sleep(500 * time.Millisecond)
+			mappingsMutex.Lock()
+			for k := range mappings {
+				c.WriteToUDP(punchPayload, k.toUDP())
+			}
+			mappingsMutex.Unlock()
+			d := 500*time.Millisecond - time.Now().Sub(now)
+			if d > 0 {
+				time.Sleep(d)
+			}
 		}
 	}()
 	defer close(chRelay)
 
-	var remoteAddr net.UDPAddr
-	buffer := make([]byte, 4096)
-
-	receivedIp := false
-	for {
-		n, addr, err := c.ReadFromUDP(buffer)
-		if err != nil {
-			// err is thrown if the buffer is too small
-			continue
-		}
-		if !addr.IP.Equal(relayAddr.IP) || addr.Port != relayAddr.Port {
-			continue
-		}
-		if n == 4 {
-			if !receivedIp {
-				receivedIp = true
-				ip := net.IP(buffer[:4])
-				fmt.Println("Connected. Ask your peer to connect to " + ip.String() + " on port " + strconv.Itoa(port) + " with proxypunch")
-			}
-			continue
-		}
-		if n != 6 {
-			fmt.Fprintln(os.Stderr, "Error received packet of wrong size from relay. (size:"+strconv.Itoa(n)+")")
-			continue
-		}
-		ip := make([]byte, 4)
-		copy(ip, buffer[2:6])
-		remoteAddr = net.UDPAddr{
-			IP:   net.IP(ip),
-			Port: int(binary.BigEndian.Uint16(buffer[:2])),
-		}
-		break
-	}
-
-	chPunch := make(chan struct{})
+	// relay receive loop
+	chIp := make(chan struct{})
+	chReceive := make(chan struct{})
 	go func() {
-		punchPayload := []byte{0xCD}
+		ipReceived := false
+		buffer := make([]byte, 4096)
 		for {
 			select {
-			case <-chPunch:
+			case <-chReceive:
 				return
 			default:
 			}
-			c.WriteToUDP(punchPayload, &remoteAddr)
-			time.Sleep(500 * time.Millisecond)
+
+			n, addr, err := c.ReadFromUDP(buffer)
+			if err != nil {
+				// err is thrown if the buffer is too small
+				continue
+			}
+			if !addr.IP.Equal(relayAddr.IP) || addr.Port != relayAddr.Port {
+				continue
+			}
+			if n < 4 || n%6 != 4 {
+				fmt.Fprintln(os.Stderr, "Error received packet of wrong size from relay. (size:"+strconv.Itoa(n)+")")
+				continue
+			}
+			if !ipReceived {
+				ipReceived = true
+				for i, v := range buffer[:4] {
+					buffer[i] = v ^ 0xCC // undo ip xor of relay
+				}
+				ip := net.IP(buffer[:4])
+				fmt.Println("Connected. Ask your peers to connect with proxypunch to " + ip.String() + ":" + strconv.Itoa(port))
+				close(chIp)
+			}
+			i := 4
+			for i < n {
+				port := int(binary.BigEndian.Uint16(buffer[i : i+2]))
+				var ip [4]byte
+				copy(ip[:], buffer[i+2:i+6])
+				mappingsMutex.Lock()
+				mappings[addrKey{
+					ip:   ip,
+					port: port,
+				}] = time.Now()
+				mappingsMutex.Unlock()
+				i += 6
+			}
+			break
 		}
 	}()
-	defer close(chPunch)
+	defer close(chReceive)
 
-	foundPeer := false
+	// wait to get external ip before continuing
+	<-chIp
+
+	// connected to relay, main server<->peers loop
+	buffer := make([]byte, 4096)
+	peers := make(map[addrKey]*addrValue)
+	flushTime := time.Now()
 	for {
+		// timeout old peers
+		now := time.Now()
+		if now.Sub(flushTime) > flushInterval {
+			flushTime = now
+			for k, v := range peers {
+				if now.Sub(v.last) > flushInterval {
+					fmt.Println("Peer disconnected (timeout) with IP: " + k.toUDP().IP.String())
+					delete(peers, k)
+					v.c.Close()
+				}
+			}
+		}
+
 		n, addr, err := c.ReadFromUDP(buffer[1:])
 		if err != nil {
 			// err is thrown if the buffer is too small
@@ -238,17 +318,43 @@ func server(port int) {
 		if addr.IP.Equal(relayAddr.IP) && addr.Port == relayAddr.Port {
 			continue
 		}
-		if addr.IP.Equal(remoteAddr.IP) && addr.Port == remoteAddr.Port {
-			if !foundPeer {
-				foundPeer = true
-				fmt.Println("Connected to peer")
+		addrKey := newAddrKey(addr)
+		if v, ok := peers[addrKey]; ok { // existing peer
+			if n != 0 && buffer[1] == 0xCC { // forward to server
+				v.c.WriteToUDP(buffer[2:n+1], localAddr)
 			}
-			if n != 0 && buffer[1] == 0xCC {
-				c.WriteToUDP(buffer[2:n+1], localAddr)
+			peers[addrKey].last = time.Now()
+		} else { // new peer
+			fmt.Println("New peer connected with IP: " + addr.IP.To4().String())
+			cLocal, err := net.ListenUDP("udp4", nil)
+			if err != nil {
+				log.Fatal(err)
 			}
-		} else if (localIpv4.Contains(addr.IP) || localIpv6.Contains(addr.IP)) && addr.Port == port {
-			buffer[0] = 0xCC
-			c.WriteToUDP(buffer[:n+1], &remoteAddr)
+			peers[addrKey] = &addrValue{
+				c:    cLocal,
+				last: time.Now(),
+			}
+			go func() { // receive from server, forward to remote peer
+				buffer := make([]byte, 4096)
+				for {
+					n, _, err := cLocal.ReadFromUDP(buffer[1:])
+					if err != nil {
+						if _, ok := peers[addrKey]; ok {
+							fmt.Fprintln(os.Stderr, "Peer disconnected (read failed) with IP: "+addr.String())
+							cLocal.Close()
+							delete(peers, addrKey)
+						}
+						break
+					}
+					if n > len(buffer)-1 {
+						fmt.Fprintln(os.Stderr, "Error received packet of wrong size from game server. (size:"+strconv.Itoa(n)+")")
+						continue
+					}
+					buffer[0] = 0xCC
+					c.WriteToUDP(buffer[:n+1], addr)
+				}
+			}()
+			defer cLocal.Close()
 		}
 	}
 }
@@ -479,9 +585,9 @@ func main() {
 	if mode == "c" || mode == "client" {
 		for host == "" {
 			if config.Host != "" {
-				fmt.Println("Host? [" + config.Host + "]")
+				fmt.Println("Host / Host:Port ? [" + config.Host + "]")
 			} else {
-				fmt.Println("Host? ")
+				fmt.Println("Host / Host:Port ? ")
 			}
 			if !scanner.Scan() {
 				return
