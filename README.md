@@ -1,6 +1,6 @@
 # proxypunch ![Github All Releases](https://img.shields.io/github/downloads/delthas/proxypunch/total.svg?style=flat-square)
 
-### This tool has been superseded by [autopunch](https://github.com/delthas/autopunch), a much more user-friendly and simpler tool to do the same thing! Please consider downloading and using autopunch rather than proxypunch. (Only for Windows users.)
+### If you're playing Soku on Windows 64 bits, use [autopunch](https://github.com/delthas/autopunch) instead, a much more user-friendly and simpler tool to do the same thing!
 
 **This program lets you host & connect to friends to play peer-to-peer games without having to open or redirect any port.**
 
