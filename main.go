@@ -2,11 +2,11 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"gopkg.in/yaml.v2"
 	"io"
 	"io/ioutil"
 	"log"
@@ -19,6 +19,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/machinebox/progress"
+	"gopkg.in/yaml.v2"
 )
 
 const relayHost = "delthas.fr:14761"
@@ -29,10 +32,11 @@ var _, localIpv4, _ = net.ParseCIDR("127.0.0.0/8")
 var _, localIpv6, _ = net.ParseCIDR("fc00::/7")
 
 type Config struct {
-	Mode       string `yaml:"mode"`
-	LocalPort  int    `yaml:"local_port"`
-	Host       string `yaml:"remote_host"`
-	RemotePort int    `yaml:"remote_port"`
+	Mode                string `yaml:"mode"`
+	LocalPort           int    `yaml:"local_port"`
+	Host                string `yaml:"remote_host"`
+	RemotePort          int    `yaml:"remote_port"`
+	DownloadedAutopunch bool   `yaml:"downloaded_autopunch"`
 }
 
 func client(host string, port int) {
@@ -383,6 +387,100 @@ func update(scanner *bufio.Scanner) bool {
 	return false
 }
 
+func autopunch() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return false
+	}
+	autopunchPath := filepath.Join(filepath.Dir(exe), "autopunch.exe")
+	if _, err := os.Stat(autopunchPath); err == nil {
+		return false
+	}
+
+	httpClient := http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
+				dialer := net.Dialer{Timeout: 5 * time.Second}
+				return dialer.DialContext(ctx, network, addr)
+			},
+		},
+	}
+	r, err := httpClient.Get("https://api.github.com/repos/delthas/autopunch/releases")
+	if err != nil {
+		return false
+	}
+	var releases []struct {
+		TagName string `json:"tag_name"`
+		Name    string `json:"name"`
+		Assets  []struct {
+			Name        string `json:"name"`
+			DownloadUrl string `json:"browser_download_url"`
+			Size        int64  `json:"size"`
+		} `json:"assets"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&releases)
+	r.Body.Close()
+	if err != nil {
+		return false
+	}
+	if len(releases) == 0 || len(releases[0].Assets) == 0 {
+		return false
+	}
+	asset := releases[0].Assets[0]
+
+	r, err = httpClient.Get(asset.DownloadUrl)
+	if err != nil {
+		return false
+	}
+	f, err := ioutil.TempFile("", "")
+	if err != nil {
+		r.Body.Close()
+		return false
+	}
+	pr := progress.NewReader(r.Body)
+
+	fmt.Println("===================================================")
+	fmt.Println("proxypunch will now try to download autopunch for you (will only do that once).")
+	defer fmt.Println("===================================================")
+
+	go func() {
+		ctx := context.Background()
+		progressChan := progress.NewTicker(ctx, pr, asset.Size, 1*time.Second)
+		for p := range progressChan {
+			fmt.Printf("\rdownload: %v remaining...", p.Remaining().Round(time.Second))
+		}
+		fmt.Println("\rdownload is completed!")
+	}()
+	_, err = io.Copy(f, pr)
+	r.Body.Close()
+	f.Close()
+
+	if err != nil {
+		fmt.Println("proxypunch failed downaloading autopunch; you can still download it manually")
+		fmt.Println("at: delthas.fr/proxypunch")
+		return false
+	}
+
+	err = os.Rename(f.Name(), autopunchPath)
+	if err != nil {
+		fmt.Println("proxypunch failed downaloading autopunch; you can still download it manually")
+		fmt.Println("at: delthas.fr/proxypunch")
+		return false
+	}
+
+	fmt.Println("download succeeded! autopunch is now available at: " + autopunchPath)
+	fmt.Println("It is highly recommended that you read the (short) instructions at delthas.fr/proxypunch")
+	fmt.Println("Note that your peer will need to switch to autopunch as well! proxypunch is only compatible with itself/")
+	fmt.Println("You can now close proxypunch.")
+
+	return true
+}
+
 var ProgramVersion string
 var ProgramArch string
 
@@ -445,6 +543,29 @@ func main() {
 			}
 			if config.RemotePort <= 0 || config.RemotePort > 65535 {
 				config.RemotePort = 0
+			}
+		}
+	}
+
+	if !noConfig && runtime.GOOS == "windows" {
+		fmt.Println("===================================================")
+		fmt.Println("A NEW VERSION OF PROXYPUNCH IS AVAILABLE: AUTOPUNCH")
+		fmt.Println("autopunch is better and simpler than proxypunch: it is as simple as sokuroll!")
+		fmt.Println("Run an exe and that's it! the game will work without forwarding ports.")
+		fmt.Println("- no need to type an ip into another window!")
+		fmt.Println("- no need to type a different ip into the game!")
+		fmt.Println("- it has a simple window (rather than text in an ugly window)")
+		fmt.Println("- you can use it even with users who don't have it, so you can always leave it on")
+		fmt.Println("There's really no reason to use proxypunch anymore.")
+		fmt.Println("You can download it (and check out instructions) at: delthas.fr/autopunch")
+		fmt.Println("===================================================")
+		if !config.DownloadedAutopunch {
+			if autopunch() {
+				config.DownloadedAutopunch = true
+
+				if !noConfig && !noSave {
+					saveConfig(configFile, config)
+				}
 			}
 		}
 	}
@@ -540,24 +661,28 @@ func main() {
 	}
 
 	if !noConfig && !noSave && (saveHost || saveMode || savePort) {
-		file, err := os.Create(configFile)
-		if err != nil {
-			if !os.IsNotExist(err) {
-				fmt.Fprintln(os.Stderr, "Error opening file "+configFile+": "+err.Error())
-			}
-		} else {
-			encoder := yaml.NewEncoder(file)
-			err = encoder.Encode(&config)
-			file.Close()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "Error saving config to file "+configFile+". ("+err.Error()+")")
-			}
-		}
+		saveConfig(configFile, config)
 	}
 
 	if mode == "c" || mode == "client" {
 		client(host, port)
 	} else {
 		server(port)
+	}
+}
+
+func saveConfig(configFile string, config Config) {
+	file, err := os.Create(configFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "Error opening file "+configFile+": "+err.Error())
+		}
+	} else {
+		encoder := yaml.NewEncoder(file)
+		err = encoder.Encode(&config)
+		file.Close()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error saving config to file "+configFile+". ("+err.Error()+")")
+		}
 	}
 }

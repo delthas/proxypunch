@@ -1,5 +1,7 @@
 # proxypunch ![Github All Releases](https://img.shields.io/github/downloads/delthas/proxypunch/total.svg?style=flat-square)
 
+### This tool has been superseded by [autopunch](https://github.com/delthas/autopunch), a much more user-friendly and simpler tool to do the same thing! Please consider downloading and using autopunch rather than proxypunch.
+
 **This program lets you host & connect to friends to play peer-to-peer games without having to open or redirect any port.**
 
 *Technical details: proxypunch creates a user-friendly UDP proxy/tunnel between two peers by hole punching the user's NAT with a custom STUN-like server which additionally "matchmakes" users based on their internal port rather than their NAT-ed port.*  
